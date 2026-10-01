@@ -193,7 +193,9 @@ static ncclResult_t commFree(ncclComm_t comm) {
     }
   }
 
-  CUDACHECK(cudaMemPoolDestroy(comm->memPool));
+  if (comm->memPool != nullptr) {
+    CUDACHECK(cudaMemPoolDestroy(comm->memPool));
+  }
 
   delete[] comm->userRedOps;
 
@@ -409,14 +411,22 @@ static ncclResult_t commAlloc(struct ncclComm* comm, struct ncclComm* parent, in
   comm->regCache.pageSize = sysconf(_SC_PAGESIZE);
 
   do {
-    cudaMemPoolProps props = {};
-    props.allocType = cudaMemAllocationTypePinned;
-    props.handleTypes = cudaMemHandleTypeNone;
-    props.location.type = cudaMemLocationTypeDevice;
-    props.location.id = comm->cudaDev;
-    CUDACHECK(cudaMemPoolCreate(&comm->memPool, &props));
-    uint64_t releaseThreshold = ~uint64_t(0);
-    CUDACHECK(cudaMemPoolSetAttribute(comm->memPool, cudaMemPoolAttrReleaseThreshold, &releaseThreshold));
+    // Kepler (sm_35) and some Maxwell devices do not support stream-ordered
+    // memory pools; fall back to plain cudaMalloc in that case.
+    int memPoolSupported = 0;
+    CUDACHECK(cudaDeviceGetAttribute(&memPoolSupported, cudaDevAttrMemoryPoolsSupported, comm->cudaDev));
+    if (memPoolSupported) {
+      cudaMemPoolProps props = {};
+      props.allocType = cudaMemAllocationTypePinned;
+      props.handleTypes = cudaMemHandleTypeNone;
+      props.location.type = cudaMemLocationTypeDevice;
+      props.location.id = comm->cudaDev;
+      CUDACHECK(cudaMemPoolCreate(&comm->memPool, &props));
+      uint64_t releaseThreshold = ~uint64_t(0);
+      CUDACHECK(cudaMemPoolSetAttribute(comm->memPool, cudaMemPoolAttrReleaseThreshold, &releaseThreshold));
+    } else {
+      comm->memPool = nullptr;
+    }
   } while (0);
 
   ncclIntruQueueConstruct(&comm->eventCallbackQueue);
